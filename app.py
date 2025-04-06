@@ -9,7 +9,7 @@ import pytz
 import requests
 import pandas as pd
 import numpy as np
-from predictor import predict_next_10_candles, predict_next_prices
+from predictor import predict_next_prices
 from analyzer import get_trading_signals
 import logging
 import pyupbit
