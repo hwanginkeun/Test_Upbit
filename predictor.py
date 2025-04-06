@@ -159,10 +159,25 @@ def train_model(df, sequence_length=10, epochs=100):
     
     return model, scaler
 
+def create_sequences(data, seq_length):
+    sequences = []
+    targets = []
+    for i in range(len(data) - seq_length):
+        seq = data[i:i + seq_length]
+        target = data[i + seq_length]
+        sequences.append(seq)
+        targets.append(target)
+    return np.array(sequences), np.array(targets)
+
 def predict_next_prices(df, n_steps=5):
     try:
+        print("Starting prediction...")  # 디버깅용 로그
+        
         # 종가 데이터 추출
         prices = df['close'].values.reshape(-1, 1)
+        if len(prices) < 15:  # 최소 데이터 포인트 체크
+            print("Not enough data points for prediction")
+            return None
         
         # 데이터 정규화
         scaler = MinMaxScaler()
@@ -171,6 +186,12 @@ def predict_next_prices(df, n_steps=5):
         # 시퀀스 생성
         seq_length = 10
         X, y = create_sequences(prices_scaled, seq_length)
+        
+        if len(X) == 0:
+            print("No sequences created")
+            return None
+        
+        print(f"Created {len(X)} sequences")  # 디버깅용 로그
         
         # 모델 생성
         model = tf.keras.Sequential([
@@ -188,6 +209,8 @@ def predict_next_prices(df, n_steps=5):
             patience=5,
             restore_best_weights=True
         )
+        
+        print("Training model...")  # 디버깅용 로그
         
         # 모델 학습
         model.fit(
@@ -212,19 +235,12 @@ def predict_next_prices(df, n_steps=5):
         
         # 예측값 역정규화
         predictions = scaler.inverse_transform(np.array(predictions_scaled))
+        predictions = predictions.flatten().tolist()
         
-        return predictions.flatten().tolist()
+        print(f"Generated predictions: {predictions}")  # 디버깅용 로그
+        
+        return predictions
         
     except Exception as e:
-        print(f"Error in prediction: {e}")
-        return None
-
-def create_sequences(data, seq_length):
-    sequences = []
-    targets = []
-    for i in range(len(data) - seq_length):
-        seq = data[i:i + seq_length]
-        target = data[i + seq_length]
-        sequences.append(seq)
-        targets.append(target)
-    return np.array(sequences), np.array(targets) 
+        print(f"Error in prediction: {str(e)}")
+        return None 

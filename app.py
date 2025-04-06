@@ -150,13 +150,19 @@ def get_market_data(market, interval='minute15'):
         price_change_percent = (price_change / df['close'].iloc[-2]) * 100
         
         # 예측 데이터 (15분봉일 때만)
-        predictions = None
+        predictions = []
         if interval == 'minute15':
             try:
-                predictions = predict_next_prices(df)
+                predicted_prices = predict_next_prices(df)
+                if predicted_prices and len(predicted_prices) > 0:
+                    # 예측값이 리스트가 아니면 리스트로 변환
+                    if not isinstance(predicted_prices, list):
+                        predicted_prices = predicted_prices.tolist()
+                    predictions = predicted_prices
+                    print(f"Predictions generated: {predictions}")  # 디버깅용 로그
             except Exception as e:
                 print(f"Error in prediction: {e}")
-                predictions = None
+                predictions = []
         
         # 캔들 데이터 준비
         candle_data = []
@@ -178,7 +184,7 @@ def get_market_data(market, interval='minute15'):
             'signal_type': signal_type,
             'confidence': confidence,
             'candle_data': candle_data,
-            'predictions': predictions
+            'predictions': predictions if predictions else None
         }
         
         # 캐시 업데이트
