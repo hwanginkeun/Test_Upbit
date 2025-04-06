@@ -1,8 +1,7 @@
 import os
 from flask import Flask, render_template, jsonify
-import eel
+from flask_cors import CORS
 import json
-import webbrowser
 import threading
 import time
 from datetime import datetime
@@ -10,10 +9,11 @@ import pytz
 import requests
 import pandas as pd
 import numpy as np
-from predictor import predict_next_prices
+from predictor import predict_next_10_candles
 from analyzer import get_trading_signals
 
 app = Flask(__name__)
+CORS(app)  # CORS 지원 추가
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 
 def get_market_list():
@@ -75,7 +75,7 @@ def get_market_data(market, interval="minute15"):
         # 다음 가격 예측
         predictions = None
         if interval == "minute15":
-            predictions = predict_next_prices(df)
+            predictions = predict_next_10_candles(df)
         
         response_data = {
             'current_price': current_price,
