@@ -4,6 +4,7 @@ import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 import pandas as pd
 import time
+import tensorflow as tf
 
 # 모델 캐시를 위한 전역 변수
 cached_model = None
@@ -158,16 +159,72 @@ def train_model(df, sequence_length=10, epochs=100):
     
     return model, scaler
 
-def predict_next_10_candles(model, df, scaler, sequence_length=10):
-    # 최근 데이터 준비
-    recent_data = df['trade_price'].values[-sequence_length:].reshape(-1, 1)
-    recent_data = scaler.transform(recent_data)
-    
-    # 예측
-    model.eval()
-    with torch.no_grad():
-        X = torch.FloatTensor(recent_data).unsqueeze(0)
-        predictions = model(X)
-        predictions = scaler.inverse_transform(predictions.numpy())
-    
-    return predictions[0] 
+def predict_next_prices(df, n_steps=5):
+    try:
+        # 종가 데이터 추출
+        prices = df['close'].values.reshape(-1, 1)
+        
+        # 데이터 정규화
+        scaler = MinMaxScaler()
+        prices_scaled = scaler.fit_transform(prices)
+        
+        # 시퀀스 생성
+        seq_length = 10
+        X, y = create_sequences(prices_scaled, seq_length)
+        
+        # 모델 생성
+        model = tf.keras.Sequential([
+            tf.keras.layers.LSTM(50, activation='relu', input_shape=(seq_length, 1), return_sequences=True),
+            tf.keras.layers.LSTM(50, activation='relu'),
+            tf.keras.layers.Dense(1)
+        ])
+        
+        # 모델 컴파일
+        model.compile(optimizer='adam', loss='mse')
+        
+        # 조기 종료 설정
+        early_stopping = tf.keras.callbacks.EarlyStopping(
+            monitor='loss',
+            patience=5,
+            restore_best_weights=True
+        )
+        
+        # 모델 학습
+        model.fit(
+            X.reshape(-1, seq_length, 1),
+            y,
+            epochs=100,
+            batch_size=32,
+            verbose=1,
+            callbacks=[early_stopping]
+        )
+        
+        # 다음 가격 예측
+        last_sequence = prices_scaled[-seq_length:]
+        predictions_scaled = []
+        
+        current_sequence = last_sequence.reshape(1, seq_length, 1)
+        for _ in range(n_steps):
+            next_pred = model.predict(current_sequence, verbose=0)
+            predictions_scaled.append(next_pred[0])
+            current_sequence = np.roll(current_sequence, -1)
+            current_sequence[0, -1, 0] = next_pred
+        
+        # 예측값 역정규화
+        predictions = scaler.inverse_transform(np.array(predictions_scaled))
+        
+        return predictions.flatten().tolist()
+        
+    except Exception as e:
+        print(f"Error in prediction: {e}")
+        return None
+
+def create_sequences(data, seq_length):
+    sequences = []
+    targets = []
+    for i in range(len(data) - seq_length):
+        seq = data[i:i + seq_length]
+        target = data[i + seq_length]
+        sequences.append(seq)
+        targets.append(target)
+    return np.array(sequences), np.array(targets) 
