@@ -4,14 +4,15 @@ from flask_cors import CORS
 import json
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 import requests
 import pandas as pd
 import numpy as np
-from predictor import predict_next_10_candles
+from predictor import predict_next_10_candles, predict_next_prices
 from analyzer import get_trading_signals
 import logging
+import pyupbit
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
@@ -22,17 +23,45 @@ app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 
+# 캐시 데이터
+market_list = None
+last_market_update = None
+market_data_cache = {}
+CACHE_DURATION = timedelta(minutes=1)
+
 def get_market_list():
+    global market_list, last_market_update
+    
+    # 캐시된 데이터가 있고 1시간이 지나지 않았으면 캐시 사용
+    if market_list is not None and last_market_update is not None:
+        if datetime.now() - last_market_update < timedelta(hours=1):
+            return market_list
+    
     try:
-        url = "https://api.upbit.com/v1/market/all"
-        headers = {'Accept': 'application/json'}
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()  # HTTP 오류 체크
-        markets = response.json()
-        krw_markets = [market for market in markets if market['market'].startswith('KRW-')]
-        return krw_markets
+        # 마켓 정보 가져오기
+        market_list = pyupbit.get_tickers(fiat="KRW")
+        market_info = []
+        
+        for market in market_list:
+            korean_name = market.replace("KRW-", "")  # 기본값 설정
+            try:
+                # 마켓 이름 정보 가져오기
+                market_detail = pyupbit.get_market_info(market)
+                if market_detail:
+                    korean_name = market_detail.get('korean_name', korean_name)
+            except Exception as e:
+                print(f"Error getting market info for {market}: {e}")
+            
+            market_info.append({
+                "market": market,
+                "korean_name": korean_name
+            })
+        
+        market_list = market_info
+        last_market_update = datetime.now()
+        return market_list
     except Exception as e:
-        logger.error(f"Error in get_market_list: {str(e)}")
+        print(f"Error fetching market list: {e}")
         return []
 
 def get_current_price(market):
@@ -68,69 +97,116 @@ def get_candles(market, interval="minute15", count=200):
         logger.error(f"Error in get_candles: {str(e)}")
         return pd.DataFrame()
 
+def get_market_data(market, interval='minute15'):
+    global market_data_cache
+    
+    cache_key = f"{market}_{interval}"
+    now = datetime.now()
+    
+    # 캐시된 데이터가 있고 유효하면 사용
+    if cache_key in market_data_cache:
+        cached_data = market_data_cache[cache_key]
+        if now - cached_data['timestamp'] < CACHE_DURATION:
+            return cached_data['data']
+    
+    try:
+        # 현재가 조회
+        ticker = pyupbit.Ticker(market)
+        current_price = ticker.trade_price
+        
+        # 과거 데이터 조회
+        if interval == 'minute1':
+            df = pyupbit.get_ohlcv(market, interval="minute1", count=60)
+        elif interval == 'minute15':
+            df = pyupbit.get_ohlcv(market, interval="minute15", count=48)
+        elif interval == 'minute60':
+            df = pyupbit.get_ohlcv(market, interval="minute60", count=24)
+        elif interval == 'day':
+            df = pyupbit.get_ohlcv(market, interval="day", count=30)
+        else:
+            df = pyupbit.get_ohlcv(market, interval="minute15", count=48)
+        
+        if df is None or df.empty:
+            raise Exception("데이터를 가져올 수 없습니다.")
+        
+        # 거래량 분석
+        volume_mean = df['volume'].mean()
+        current_volume = df['volume'].iloc[-1]
+        volume_ratio = current_volume / volume_mean
+        
+        signal_type = "중립"
+        confidence = 50
+        
+        if volume_ratio > 2:
+            signal_type = "강한 매수" if df['close'].iloc[-1] > df['open'].iloc[-1] else "강한 매도"
+            confidence = min(round(volume_ratio * 25), 100)
+        elif volume_ratio > 1.5:
+            signal_type = "매수" if df['close'].iloc[-1] > df['open'].iloc[-1] else "매도"
+            confidence = min(round(volume_ratio * 20), 90)
+        
+        # 가격 변동 계산
+        price_change = current_price - df['close'].iloc[-2]
+        price_change_percent = (price_change / df['close'].iloc[-2]) * 100
+        
+        # 예측 데이터 (15분봉일 때만)
+        predictions = None
+        if interval == 'minute15':
+            try:
+                predictions = predict_next_prices(df)
+            except Exception as e:
+                print(f"Error in prediction: {e}")
+                predictions = None
+        
+        # 캔들 데이터 준비
+        candle_data = []
+        for index, row in df.iterrows():
+            candle_data.append({
+                'candle_date_time_kst': index.strftime('%Y-%m-%d %H:%M:%S'),
+                'opening_price': row['open'],
+                'high_price': row['high'],
+                'low_price': row['low'],
+                'trade_price': row['close'],
+                'candle_acc_trade_volume': row['volume']
+            })
+        
+        # 응답 데이터 구성
+        response_data = {
+            'current_price': current_price,
+            'price_change': price_change,
+            'price_change_percent': price_change_percent,
+            'signal_type': signal_type,
+            'confidence': confidence,
+            'candle_data': candle_data,
+            'predictions': predictions
+        }
+        
+        # 캐시 업데이트
+        market_data_cache[cache_key] = {
+            'timestamp': now,
+            'data': response_data
+        }
+        
+        return response_data
+        
+    except Exception as e:
+        print(f"Error fetching market data: {e}")
+        return None
+
 @app.route('/')
 def index():
     return render_template('index.html')
 
 @app.route('/api/markets')
-def get_markets():
-    try:
-        markets = get_market_list()
-        return jsonify(markets)
-    except Exception as e:
-        logger.error(f"Error in get_markets endpoint: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+def api_markets():
+    markets = get_market_list()
+    return jsonify(markets)
 
 @app.route('/api/market_data/<market>/<interval>')
-def get_market_data(market, interval="minute15"):
-    try:
-        logger.info(f"Fetching market data for {market} with interval {interval}")
-        
-        # 캔들 데이터 가져오기
-        df = get_candles(market, interval)
-        if df.empty:
-            return jsonify({'error': 'Failed to fetch candle data'}), 500
-        
-        # 현재가 정보 가져오기
-        current_price_info = get_current_price(market)
-        if not current_price_info:
-            return jsonify({'error': 'Failed to fetch current price'}), 500
-        
-        # 가격 변화 계산
-        current_price = current_price_info['trade_price']
-        prev_price = current_price_info['prev_closing_price']
-        
-        price_change = current_price - prev_price
-        price_change_percent = (price_change / prev_price) * 100
-        
-        # 거래량 분석 및 매매 시그널 생성
-        trading_signals = get_trading_signals(df)
-        
-        # 다음 가격 예측
-        predictions = None
-        if interval == "minute15":
-            try:
-                predictions = predict_next_10_candles(df)
-            except Exception as e:
-                logger.error(f"Prediction error: {str(e)}")
-                predictions = None
-        
-        response_data = {
-            'current_price': current_price,
-            'price_change': price_change,
-            'price_change_percent': price_change_percent,
-            'signal_type': trading_signals['signal_type'],
-            'confidence': trading_signals['confidence'],
-            'candle_data': df.to_dict('records'),
-            'predictions': predictions.tolist() if predictions is not None else None
-        }
-        
-        logger.info(f"Successfully processed market data for {market}")
-        return jsonify(response_data)
-    
-    except Exception as e:
-        logger.error(f"Error in get_market_data endpoint: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+def api_market_data(market, interval):
+    data = get_market_data(market, interval)
+    if data is None:
+        return jsonify({'error': '데이터를 가져올 수 없습니다.'}), 500
+    return jsonify(data)
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8000))
