@@ -11,38 +11,62 @@ import pandas as pd
 import numpy as np
 from predictor import predict_next_10_candles
 from analyzer import get_trading_signals
+import logging
+
+# 로깅 설정
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-CORS(app)  # CORS 지원 추가
+# CORS 설정 업데이트
+CORS(app, resources={r"/api/*": {"origins": "*"}})
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 
 def get_market_list():
-    url = "https://api.upbit.com/v1/market/all"
-    response = requests.get(url)
-    markets = response.json()
-    krw_markets = [market for market in markets if market['market'].startswith('KRW-')]
-    return krw_markets
+    try:
+        url = "https://api.upbit.com/v1/market/all"
+        headers = {'Accept': 'application/json'}
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()  # HTTP 오류 체크
+        markets = response.json()
+        krw_markets = [market for market in markets if market['market'].startswith('KRW-')]
+        return krw_markets
+    except Exception as e:
+        logger.error(f"Error in get_market_list: {str(e)}")
+        return []
 
 def get_current_price(market):
-    url = f"https://api.upbit.com/v1/ticker?markets={market}"
-    response = requests.get(url)
-    return response.json()[0]
+    try:
+        url = f"https://api.upbit.com/v1/ticker?markets={market}"
+        headers = {'Accept': 'application/json'}
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()  # HTTP 오류 체크
+        return response.json()[0]
+    except Exception as e:
+        logger.error(f"Error in get_current_price: {str(e)}")
+        return None
 
 def get_candles(market, interval="minute15", count=200):
-    intervals = {
-        "minute1": "minutes/1",
-        "minute15": "minutes/15",
-        "minute60": "minutes/60",
-        "day": "days"
-    }
-    
-    url = f"https://api.upbit.com/v1/candles/{intervals[interval]}?market={market}&count={count}"
-    response = requests.get(url)
-    data = response.json()
-    
-    df = pd.DataFrame(data)
-    df = df.sort_values('candle_date_time_kst')
-    return df
+    try:
+        intervals = {
+            "minute1": "minutes/1",
+            "minute15": "minutes/15",
+            "minute60": "minutes/60",
+            "day": "days"
+        }
+        
+        url = f"https://api.upbit.com/v1/candles/{intervals[interval]}?market={market}&count={count}"
+        headers = {'Accept': 'application/json'}
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()  # HTTP 오류 체크
+        data = response.json()
+        
+        df = pd.DataFrame(data)
+        df = df.sort_values('candle_date_time_kst')
+        return df
+    except Exception as e:
+        logger.error(f"Error in get_candles: {str(e)}")
+        return pd.DataFrame()
 
 @app.route('/')
 def index():
@@ -50,17 +74,27 @@ def index():
 
 @app.route('/api/markets')
 def get_markets():
-    markets = get_market_list()
-    return jsonify(markets)
+    try:
+        markets = get_market_list()
+        return jsonify(markets)
+    except Exception as e:
+        logger.error(f"Error in get_markets endpoint: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/market_data/<market>/<interval>')
 def get_market_data(market, interval="minute15"):
     try:
+        logger.info(f"Fetching market data for {market} with interval {interval}")
+        
         # 캔들 데이터 가져오기
         df = get_candles(market, interval)
+        if df.empty:
+            return jsonify({'error': 'Failed to fetch candle data'}), 500
         
         # 현재가 정보 가져오기
         current_price_info = get_current_price(market)
+        if not current_price_info:
+            return jsonify({'error': 'Failed to fetch current price'}), 500
         
         # 가격 변화 계산
         current_price = current_price_info['trade_price']
@@ -75,7 +109,11 @@ def get_market_data(market, interval="minute15"):
         # 다음 가격 예측
         predictions = None
         if interval == "minute15":
-            predictions = predict_next_10_candles(df)
+            try:
+                predictions = predict_next_10_candles(df)
+            except Exception as e:
+                logger.error(f"Prediction error: {str(e)}")
+                predictions = None
         
         response_data = {
             'current_price': current_price,
@@ -87,9 +125,11 @@ def get_market_data(market, interval="minute15"):
             'predictions': predictions.tolist() if predictions is not None else None
         }
         
+        logger.info(f"Successfully processed market data for {market}")
         return jsonify(response_data)
     
     except Exception as e:
+        logger.error(f"Error in get_market_data endpoint: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
