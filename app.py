@@ -111,8 +111,9 @@ def get_market_data(market, interval='minute15'):
     
     try:
         # 현재가 조회
-        ticker = pyupbit.Ticker(market)
-        current_price = ticker.trade_price
+        current_price = pyupbit.get_current_price(market)
+        if current_price is None:
+            raise Exception("현재가를 가져올 수 없습니다.")
         
         # 과거 데이터 조회
         if interval == 'minute1':
