@@ -2,25 +2,24 @@ import os
 from flask import Flask, render_template, jsonify
 from flask_cors import CORS
 import json
-import threading
-import time
 from datetime import datetime, timedelta
 import pytz
 import requests
 import pandas as pd
 import numpy as np
 from predictor import predict_next_prices
-from analyzer import get_trading_signals
 import logging
 import pyupbit
 
 # 로깅 설정
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-# CORS 설정 업데이트
-CORS(app, resources={r"/api/*": {"origins": "*"}})
+CORS(app)
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 
 # 캐시 데이터
@@ -32,13 +31,14 @@ CACHE_DURATION = timedelta(minutes=1)
 def get_market_list():
     global market_list, last_market_update
     
-    # 캐시된 데이터가 있고 1시간이 지나지 않았으면 캐시 사용
-    if market_list is not None and last_market_update is not None:
-        if datetime.now() - last_market_update < timedelta(hours=1):
-            return market_list
-    
     try:
+        # 캐시된 데이터가 있고 1시간이 지나지 않았으면 캐시 사용
+        if market_list is not None and last_market_update is not None:
+            if datetime.now() - last_market_update < timedelta(hours=1):
+                return market_list
+        
         # 마켓 정보 가져오기
+        logger.info("Fetching market list from Upbit")
         market_list = pyupbit.get_tickers(fiat="KRW")
         market_info = []
         
@@ -50,7 +50,7 @@ def get_market_list():
                 if market_detail:
                     korean_name = market_detail.get('korean_name', korean_name)
             except Exception as e:
-                print(f"Error getting market info for {market}: {e}")
+                logger.error(f"Error getting market info for {market}: {e}")
             
             market_info.append({
                 "market": market,
@@ -59,57 +59,28 @@ def get_market_list():
         
         market_list = market_info
         last_market_update = datetime.now()
+        logger.info(f"Successfully fetched {len(market_info)} markets")
         return market_list
+        
     except Exception as e:
-        print(f"Error fetching market list: {e}")
+        logger.error(f"Error fetching market list: {e}")
         return []
-
-def get_current_price(market):
-    try:
-        url = f"https://api.upbit.com/v1/ticker?markets={market}"
-        headers = {'Accept': 'application/json'}
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()  # HTTP 오류 체크
-        return response.json()[0]
-    except Exception as e:
-        logger.error(f"Error in get_current_price: {str(e)}")
-        return None
-
-def get_candles(market, interval="minute15", count=200):
-    try:
-        intervals = {
-            "minute1": "minutes/1",
-            "minute15": "minutes/15",
-            "minute60": "minutes/60",
-            "day": "days"
-        }
-        
-        url = f"https://api.upbit.com/v1/candles/{intervals[interval]}?market={market}&count={count}"
-        headers = {'Accept': 'application/json'}
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()  # HTTP 오류 체크
-        data = response.json()
-        
-        df = pd.DataFrame(data)
-        df = df.sort_values('candle_date_time_kst')
-        return df
-    except Exception as e:
-        logger.error(f"Error in get_candles: {str(e)}")
-        return pd.DataFrame()
 
 def get_market_data(market, interval='minute15'):
     global market_data_cache
     
-    cache_key = f"{market}_{interval}"
-    now = datetime.now()
-    
-    # 캐시된 데이터가 있고 유효하면 사용
-    if cache_key in market_data_cache:
-        cached_data = market_data_cache[cache_key]
-        if now - cached_data['timestamp'] < CACHE_DURATION:
-            return cached_data['data']
-    
     try:
+        cache_key = f"{market}_{interval}"
+        now = datetime.now()
+        
+        # 캐시된 데이터가 있고 유효하면 사용
+        if cache_key in market_data_cache:
+            cached_data = market_data_cache[cache_key]
+            if now - cached_data['timestamp'] < CACHE_DURATION:
+                return cached_data['data']
+        
+        logger.info(f"Fetching market data for {market} with interval {interval}")
+        
         # 현재가 조회
         current_price = pyupbit.get_current_price(market)
         if current_price is None:
@@ -155,36 +126,32 @@ def get_market_data(market, interval='minute15'):
             try:
                 predicted_prices = predict_next_prices(df)
                 if predicted_prices and len(predicted_prices) > 0:
-                    # 예측값이 리스트가 아니면 리스트로 변환
-                    if not isinstance(predicted_prices, list):
-                        predicted_prices = predicted_prices.tolist()
                     predictions = predicted_prices
-                    print(f"Predictions generated: {predictions}")  # 디버깅용 로그
+                    logger.info(f"Generated predictions for {market}: {predictions}")
             except Exception as e:
-                print(f"Error in prediction: {e}")
-                predictions = []
+                logger.error(f"Error in prediction for {market}: {e}")
         
         # 캔들 데이터 준비
         candle_data = []
         for index, row in df.iterrows():
             candle_data.append({
                 'candle_date_time_kst': index.strftime('%Y-%m-%d %H:%M:%S'),
-                'opening_price': row['open'],
-                'high_price': row['high'],
-                'low_price': row['low'],
-                'trade_price': row['close'],
-                'candle_acc_trade_volume': row['volume']
+                'opening_price': float(row['open']),
+                'high_price': float(row['high']),
+                'low_price': float(row['low']),
+                'trade_price': float(row['close']),
+                'candle_acc_trade_volume': float(row['volume'])
             })
         
         # 응답 데이터 구성
         response_data = {
-            'current_price': current_price,
-            'price_change': price_change,
-            'price_change_percent': price_change_percent,
+            'current_price': float(current_price),
+            'price_change': float(price_change),
+            'price_change_percent': float(price_change_percent),
             'signal_type': signal_type,
             'confidence': confidence,
             'candle_data': candle_data,
-            'predictions': predictions if predictions else None
+            'predictions': [float(p) for p in predictions] if predictions else None
         }
         
         # 캐시 업데이트
@@ -193,10 +160,11 @@ def get_market_data(market, interval='minute15'):
             'data': response_data
         }
         
+        logger.info(f"Successfully fetched market data for {market}")
         return response_data
         
     except Exception as e:
-        print(f"Error fetching market data: {e}")
+        logger.error(f"Error fetching market data for {market}: {e}")
         return None
 
 @app.route('/')
@@ -205,16 +173,24 @@ def index():
 
 @app.route('/api/markets')
 def api_markets():
-    markets = get_market_list()
-    return jsonify(markets)
+    try:
+        markets = get_market_list()
+        return jsonify(markets)
+    except Exception as e:
+        logger.error(f"Error in /api/markets: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/market_data/<market>/<interval>')
 def api_market_data(market, interval):
-    data = get_market_data(market, interval)
-    if data is None:
-        return jsonify({'error': '데이터를 가져올 수 없습니다.'}), 500
-    return jsonify(data)
+    try:
+        data = get_market_data(market, interval)
+        if data is None:
+            return jsonify({'error': '데이터를 가져올 수 없습니다.'}), 500
+        return jsonify(data)
+    except Exception as e:
+        logger.error(f"Error in /api/market_data: {e}")
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8000))
-    app.run(host='0.0.0.0', port=port) 
+    app.run(host='0.0.0.0', port=port, debug=False) 
